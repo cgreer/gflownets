@@ -1,0 +1,2 @@
+# gflownets
+Basic GFlowNet Setup
