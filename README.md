@@ -42,7 +42,7 @@ Install requirements:
 After training completes it will run the evaluation analysis and show the training dashboard:
 
 ![Training Dash](./img/training_dash.png)
-![Smiley Eval](./img/smiley_eval.png.png)
+![Smiley Eval](./img/smiley_eval.png)
 
 If training ran correctly, then smiley faces should be sampled proportional to their reward (~66% smiley) and the estimate for Z should be ~12.
 
