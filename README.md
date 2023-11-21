@@ -3,6 +3,8 @@ A basic GFlowNet Setup
 
 Implements a GFlowNet using the trajectory balance loss on the [Smiley Environment](https://colab.research.google.com/drive/1fUMwgu2OhYpQagpzU5mhe9_Esib3Q2VR).
 
+![Training Dash](./img/training_dash.png)
+
 Includes some basic goodies that were recommended at the [GFlowNet Workshop](#resources):
 - Off-policy training via dithering (tempering + eps-greedy)
 - Gradient clipping
@@ -39,10 +41,10 @@ Install requirements:
 
 After training completes it will run the evaluation analysis and show the training dashboard:
 
+![Training Dash](./img/training_dash.png)
 EVAL_IMAGE (todo)
-DASHBOARD_IMAGE (todo)
 
-If all goes well, then smiley faces should be sampled proportional to their reward (~66% smiley) and the estimate for Z should be ~12.
+If training ran correctly, then smiley faces should be sampled proportional to their reward (~66% smiley) and the estimate for Z should be ~12.
 
 
 <a name="resources" />
