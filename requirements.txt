@@ -1,0 +1,5 @@
+tqdm
+torch
+torchsummary
+numpy
+matplotlib
