@@ -17,22 +17,29 @@ def evaluate_trained(trainer):
     # Face distribution
     # - feature 0 is "smile/frown"
     # - feature 1 is "left eyebrow up/down"
-    # - feature 2 is "left eyebrow up/down"
-    print("\nFace Distribution:")
+    # - feature 2 is "right eyebrow up/down"
     total_smiley = 0
     total_frown = 0
+    print()
+    print("  face".ljust(25), "fraction".ljust(10), "count")
     for x in sorted(counts):
         c = counts[x]
         if x[0] == 1: # 0th feature is smile/frown
+            symbol = "😊"
             total_smiley += c
         else:
+            symbol = "🙁"
             total_frown += c
-        print(str(x).ljust(25), round(c / 2000, 3), c)
+        print(
+            ("  " + symbol + str(x)).ljust(25),
+            str(round(c / 2000, 3)).ljust(10),
+            c,
+        )
 
     print()
-    print("Z:".ljust(25), round(math.exp(model.logZ), 2))
-    print("% Smiley:".ljust(25), total_smiley / 2000.0)
-    print("Smiley/frown counts:".ljust(25), total_smiley, total_frown)
+    print("  Z:".ljust(25), round(math.exp(model.logZ), 2))
+    print("  % Smiley:".ljust(25), (total_smiley / 2000.0) * 100.0)
+    # print("Smiley/frown counts:".ljust(25), total_smiley, total_frown)
     print()
 
 
@@ -42,6 +49,6 @@ if __name__ == "__main__":
 
     # Train Model
     trainer = Trainer(env=env)
-    trainer.train(n_episodes=7000)
+    trainer.train(n_episodes=10_000)
     evaluate_trained(trainer)
     trainer.dashboard()
