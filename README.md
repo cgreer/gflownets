@@ -26,16 +26,18 @@ See [torchgfn](#resources) and [gflownet](#resources) for mature libraries.
 ### Install Packages
 
 Activate virtual environment:
+
     source gfn/bin/activate
 
 Install requirements:
+
     pip install -r requirements.txt
 
 ## Train on Smiley Environment
 
     python train_smiley.py
 
-After training completes it will run the evaluation analysis and show the training dashboard.
+After training completes it will run the evaluation analysis and show the training dashboard:
 
 EVAL_IMAGE (todo)
 DASHBOARD_IMAGE (todo)
