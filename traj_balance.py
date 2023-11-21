@@ -42,7 +42,7 @@ def ema(x: List[Number], a=0.10) -> List[Number]:
     return res
 
 
-def dither(cat: Categorical, temp=1.0, eps=0.0):
+def dither(cat: Categorical, temp=1.0, eps=0.0) -> Categorical:
     # Temper the probs
     probs = torch.softmax(cat.logits / temp, dim=-1)
 
