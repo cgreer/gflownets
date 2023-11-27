@@ -1,9 +1,11 @@
 # gflownets
-A basic GFlowNet setup
+A Basic GFlowNet Setup
 
 ![Training Dash](./img/training_dash.png)
 
-Implements a GFlowNet using the trajectory balance loss on the [Smiley Environment](https://colab.research.google.com/drive/1fUMwgu2OhYpQagpzU5mhe9_Esib3Q2VR).
+## About
+
+`gflownets` implements a GFlowNet using the trajectory balance loss on the [Smiley Environment](https://colab.research.google.com/drive/1fUMwgu2OhYpQagpzU5mhe9_Esib3Q2VR).
 
 Includes some basic goodies that were recommended at the [GFlowNet Workshop](#resources):
 - Off-policy training via dithering (tempering + eps-greedy)
@@ -15,6 +17,7 @@ Includes some basic goodies that were recommended at the [GFlowNet Workshop](#re
 
 See [torchgfn](#resources) and [gflownet](#resources) for mature libraries.
 
+<br></br>
 ## Install
 
 ### Clone Repo
@@ -35,6 +38,7 @@ Install requirements:
 
     pip install -r requirements.txt
 
+<br></br>
 ## Train on Smiley Environment
 
     python train_smiley.py
@@ -49,6 +53,7 @@ If training ran correctly, then smiley faces should be sampled proportional to t
 
 <a name="resources" />
 
+<br></br>
 ## Resources
 - [GFlowNet Smiley Tutorial (Amazing Resource!)](https://colab.research.google.com/drive/1fUMwgu2OhYpQagpzU5mhe9_Esib3Q2VR)
 - [Mila GFlowNet Workshop: Day 1](https://youtu.be/HHwhQx7W8jg?t=2776)
