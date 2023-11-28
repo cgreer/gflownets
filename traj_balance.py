@@ -261,6 +261,13 @@ class Trainer:
             })
 
     def dashboard(self):
+        n_batches = len(self.batch_info)
+        batch_size = self.batch_info[0].size
+
+        # xs
+        episodes = [x * batch_size for x in range(n_batches)]
+
+        # ys
         loss = [x.loss.item() for x in self.batch_info]
         loss_ema = ema(loss)
         logZ = [x.logZ for x in self.batch_info]
@@ -274,33 +281,33 @@ class Trainer:
 
         f, ax = pp.subplots(5, 1, figsize=(14, 9))
         pp.sca(ax[0])
-        pp.plot(loss)
-        pp.plot(loss_ema)
+        pp.plot(episodes, loss)
+        pp.plot(episodes, loss_ema)
         pp.yscale('log')
         pp.ylabel('Loss')
         # ax[0].legend()
 
         pp.sca(ax[1])
-        pp.plot(np.exp(logZ))
+        pp.plot(episodes, np.exp(logZ))
         pp.ylabel('Estimated Z')
         # ax[1].legend()
 
         pp.sca(ax[2])
-        pp.plot(maxR, label="max(R)")
-        pp.plot(avgR, label="avg(R)")
-        pp.plot(avgR_ema)
+        pp.plot(episodes, maxR, label="max(R)")
+        pp.plot(episodes, avgR, label="avg(R)")
+        pp.plot(episodes, avgR_ema)
         pp.ylabel('Rewards')
         ax[2].legend()
 
         pp.sca(ax[3])
-        pp.plot(H_pf, label="H[Pf]")
-        pp.plot(H_pb, label="H[Pb]")
+        pp.plot(episodes, H_pf, label="H[Pf]")
+        pp.plot(episodes, H_pb, label="H[Pb]")
         pp.ylabel('Entropy')
         ax[3].legend()
 
         pp.sca(ax[4])
-        pp.plot(grad_norm)
-        pp.plot(grad_norm_ema)
+        pp.plot(episodes, grad_norm)
+        pp.plot(episodes, grad_norm_ema)
         pp.ylabel('||Grad||')
         # ax[4].legend()
 
@@ -349,15 +356,19 @@ class Tasks:
         print(P_x_both.probs)
 
     def check_figure(self):
-        losses = [1000.0 - x for x in range(1000)]
-        logZs = [x/100 for x in range(1000)]
+        n_batches = 100
+        batch_size = 16
+        episodes = [x * batch_size for x in list(range(n_batches))]
+        losses = [1000.0 - x for x in range(n_batches)]
+        logZs = [x/100 for x in range(n_batches)]
+
         f, ax = pp.subplots(2, 1, figsize=(10, 6))
         pp.sca(ax[0])
-        pp.plot(losses)
+        pp.plot(episodes, losses)
         pp.yscale('log')
         pp.ylabel('loss')
         pp.sca(ax[1])
-        pp.plot(np.exp(logZs))
+        pp.plot(episodes, np.exp(logZs))
         pp.ylabel('estimated Z')
         pp.show()
 
