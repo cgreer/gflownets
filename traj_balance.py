@@ -271,7 +271,13 @@ class Trainer:
         loss = [x.loss.item() for x in self.batch_info]
         loss_ema = ema(loss)
         logZ = [x.logZ for x in self.batch_info]
-        maxR = [x.max_reward for x in self.batch_info]
+        batch_maxR = [x.max_reward for x in self.batch_info]
+        maxR = []
+        for i, b_maxR in enu(batch_maxR):
+            if i == 0:
+                maxR.append(b_maxR)
+            else:
+                maxR.append(max(maxR[-1], b_maxR))
         avgR = [x.reward / x.size for x in self.batch_info]
         avgR_ema = ema(avgR)
         H_pf = [x.Pf_entropy / x.steps for x in self.batch_info]

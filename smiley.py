@@ -6,7 +6,7 @@ from typing import (
     Tuple,
     Optional,
 )
-from types import SimpleNamespace as Namespace
+from types import SimpleNamespace as Record
 
 import torch
 
@@ -125,7 +125,7 @@ class Episode:
         steps = []
         history_size = len(self.history)
         for i in range(0, history_size, 2):
-            step = Namespace()
+            step = Record()
             step.t = i // 2
             step.state = self.history[i]
             step.action_in = self.history[i-1] if i > 0 else None
