@@ -49,6 +49,10 @@ if __name__ == "__main__":
 
     # Train Model
     trainer = Trainer(env=env)
-    trainer.train(n_episodes=10_000)
+    trainer.train(
+        n_episodes=10_000,
+        batch_size=16,
+        r_temp=1.0,
+    )
     evaluate_trained(trainer)
     trainer.dashboard()
