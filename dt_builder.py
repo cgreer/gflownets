@@ -17,7 +17,7 @@ enu = enumerate
 
 Tensor = torch.Tensor
 NodeID = int
-Action = Tuple[int, float] # feature, thresh
+Action = Tuple[int, float, bool] # feature, thresh, stop
 Splitting = Tuple[int, int, float] # NodeIdx, Feature, Threshold
 
 THRESH_SIZE = 21
@@ -230,23 +230,70 @@ class Tree:
 
 
 @dataclass
+class Split:
+    feature: int = None
+    thresh: float = None
+
+    def copy(self):
+        return Split(
+            feature=self.feature,
+            thresh=self.thresh,
+        )
+
+    def complete(self):
+        # is everything defined?
+        if self.feature is None:
+            return False
+        if self.thresh is None:
+            return False
+        return True
+
+
+@dataclass
 class State:
     n_features: int
     tree: Tree
+    split: Split # Working split
+    final: bool
 
     def clone(self) -> 'State':
-        tree = self.tree.copy()
         return State(
             n_features=self.n_features,
-            tree=tree,
+            tree=self.tree.copy(),
+            split=self.split.copy(),
+            final=self.final,
         )
 
     def terminal(self) -> bool:
-        # XXX: Redo !!
+        if self.final:
+            return True
+
+        # XXX: Redo, check if no frontier splits... !!
         if self.tree.leaf(0):
             return False
         else:
             return True
+
+    def frontier_splits(self):
+        # Get leaf nodes
+        fnode_ids = set()
+        for node in self.tree.bfs(): # only active
+            if self.tree.leaf(node.id):
+                if node.parent is None:
+                    continue
+                fnode_ids.add(node.parent)
+        return [self.tree.nodes[x] for x in fnode_ids]
+
+    def complete_tree(self):
+        if self.split.feature is not None:
+            return False
+        if self.split.thresh is not None:
+            return False
+        return True
+
+    def partial_tree(self):
+        '''Are we working on split?'''
+        return not self.complete_tree()
 
     def encode(self) -> Tensor:
         '''
@@ -256,21 +303,44 @@ class State:
         - feature ohe (or 0.0 if no split) ; F
         - thresh ohe (or 0.0 if no split) ; F
         - split indicator (1.0 if split else 0.0) ; 1
+        - e.g. [feat1, thresh1, feat2, thresh2, split_ind] (per node)
 
-        The size of each node's encoding is (2F + 1). The size of the
-        entire tree's encoding is N x (2F + 1).
+        For the working "split":
+        - feature ohe (or 0.0 if not chosen) ; F
+        - thresh value (or 0.0 if not chosen) ; 1
+        - feature indicator (1 if chosen else 0.0) ; 1
+        - thresh indicator (1 if chosen else 0.0) ; 1
+        - Note: Since it's "working", we don't know which feature thresh belongs to
+        - e.g. [feat1, feat2, thresh, fchosen, threshchosen]
 
+        Sizes:
+        - Each node's encoding: (2F + 1).
+        - Working split encoding: (F + 3)
+        - Total: N x (2F + 1) + (F + 3)
         '''
         F = self.n_features
-        node_enc_size = (2 * F) + 1
         encoding = []
+
+        # Encode all nodes
+        node_enc_size = (2 * F) + 1
         for node in self.tree.nodes: # bfs order of ALL nodes
             enc = [0.0] * node_enc_size
             if node.split_feature is not None:
-                enc[node.split_feature * 2 * F] = 1.0
-                enc[node.split_feature * 2 * F + 1] = node.split_threshold
+                enc[node.split_feature * 2] = 1.0
+                enc[node.split_feature * 2 + 1] = node.split_threshold
                 enc[-1] = 1.0 # indicator
             encoding.extend(enc)
+
+        # Encode working split
+        split_enc = [0.0] * (F + 3)
+        if self.split.feature is not None:
+            split_enc[self.split.feature] = 1.0
+            split_enc[-2] = 1.0 # feature indicator
+        if self.split.thresh is not None:
+            split_enc[F] = self.split.thresh
+            split_enc[-1] = 1.0 # thresh indicator
+        encoding.extend(split_enc)
+
         return torch.tensor(encoding).float()
 
     def f_mask(self) -> Tensor:
@@ -278,10 +348,30 @@ class State:
         Action mask for forwards actions
         - allowed = 1, disallowed = 0
         '''
+        # Action Space
+        # - feature F
+        # - thresh T
+        # - stop 1
+        F = self.n_features
+        T = THRESH_SIZE
+        A = F + T + 1
         if self.terminal():
-            mask = [0] * THRESH_SIZE
+            mask = [0] * A
+            return torch.Tensor(mask).bool()
+
+        mask = []
+        if self.split.feature is None:
+            mask.extend([1] * F)
         else:
-            mask = [1] * THRESH_SIZE
+            mask.extend([0] * F)
+        if self.split.thresh is None:
+            mask.extend([1] * T)
+        else:
+            mask.extend([0] * T)
+        if self.complete_tree():
+            mask.append(1) # Only allowed to stop when tree is complete
+        else:
+            mask.append(0)
         return torch.Tensor(mask).bool()
 
     def b_mask(self) -> Tensor:
@@ -289,13 +379,31 @@ class State:
         Action mask for backwards actions
         - allowed = 1, disallowed = 0
         '''
-        mask = [0] * THRESH_SIZE
-        if self.terminal():
-            # What is the action that lead to that thresh?
-            # XXX: Replace with ANY last splits
-            thresh = self.tree.root.split_threshold
-            thresh_idx = quantize(thresh, buckets=THRESH_SIZE)
-            mask[thresh_idx] = 1
+        # Action Space
+        # - feature F
+        # - thresh T
+        # - stop 1
+        F = self.n_features
+        T = THRESH_SIZE
+        A = F + T + 1
+        mask = [0] * A
+        if self.complete_tree():
+            # Actions leading to complete trees:
+            # - any feat from frontier splits
+            # - any thresh from frontier split
+            for node in self.frontier_splits():
+                mask[node.split_feature] = 1
+                thresh_idx = quantize(node.split_threshold, buckets=T)
+                mask[F + thresh_idx] = 1
+        else:
+            # Actions leading to working trees:
+            # - feat if specified
+            # - thresh if specified
+            if self.split.feature is not None:
+                mask[self.split.feature] = 1
+            if self.split.thresh is not None:
+                thresh_idx = quantize(self.split.thresh, buckets=T)
+                mask[F + thresh_idx] = 1
         return torch.Tensor(mask).bool()
 
 
@@ -328,7 +436,9 @@ class Evaluation:
 class BaseEpisode:
 
     def current(self) -> State:
-        return self.history[-1]
+        s = self.history[-1]
+        assert isinstance(s, State)
+        return s
 
     def done(self) -> bool:
         return self.history[-1].terminal()
@@ -356,23 +466,36 @@ class Episode(BaseEpisode):
     history: List[Any] # Action | State
 
     def step(self, action: Action):
-        state = self.history[-1]
-        assert isinstance(state, State)
+        state = self.current()
+        assert sum([x is None for x in action]) == 2
+        feature, thresh, stop = action
+        if thresh is not None:
+            assert 0.0 <= thresh <= 1.0 # XXX: Handle real feature ranges
 
-        # Sanity check invalid action
-        feature, thresh = action
-        assert feature == 0 # XXX: Only single feature right now
-        assert 0.0 <= thresh <= 1.0
-
-        # Add next (a,s) pair to history
+        # Build next state
         state_p = state.clone()
-        state_p.tree.split(
-            node_id=0, # Root
-            feature=feature,
-            thresh=thresh
-        )
-        self.history.append(action)
-        self.history.append(state_p)
+        if stop:
+            assert state.split.feature is None
+            assert state.split.thresh is None
+            state_p.final = True
+        else:
+            # Update working split
+            split = state.split.copy()
+            if feature is not None:
+                split.feature = feature
+            if thresh is not None:
+                split.thresh = thresh
+
+            # Add split if complete or continue
+            # - if split is complete -> add it
+            # - else update next state's working
+            if split.complete():
+                # XXX: Change node_id when choosing nodes
+                state_p.tree.split(node_id=0, feature=split.feature, thresh=split.thresh)
+                state_p.split = Split()
+            else:
+                state_p.split = split
+        self.history.extend([action, state_p])
 
     def reward(self) -> float:
         # accuracy + penalty for train/infer time
@@ -393,31 +516,53 @@ class Env:
         initial_state = State(
             n_features=n_features,
             tree=tree,
+            split=Split(),
+            final=False,
         )
         return Episode(
             dataset=self.dataset,
             history=[initial_state],
         )
 
+    def n_features(self) -> int:
+        return len(self.dataset[0][0])
+
     def encoded_state_size(self) -> int:
         ep = self.spawn()
         return len(ep.current().encode())
 
     def encoded_action_size(self) -> int:
-        return THRESH_SIZE
+        F = self.n_features()
+        return F + THRESH_SIZE + 1
 
     def to_action_idx(self, action: Action) -> int:
-        feature, thresh = action
-        thresh_idx = quantize(thresh, buckets=THRESH_SIZE)
-        return thresh_idx
+        F = self.n_features()
+        feature, thresh, stop = action
+        if feature is not None:
+            return feature
+        elif thresh is not None:
+            thresh_idx = quantize(thresh, buckets=THRESH_SIZE)
+            return F + thresh_idx
+        elif stop:
+            return F + THRESH_SIZE
+        else:
+            raise RuntimeError("How possible?")
 
     def to_action(self, index: int) -> Action:
         # Samples a threshold uniformly from the bucket range
-        feature = 0
-        thresh = discretize(index, buckets=THRESH_SIZE)
-        b_size = bucket_size(0.0, 1.0, THRESH_SIZE)
-        thresh += random() * b_size
-        return (feature, thresh)
+        F = self.n_features()
+        feature, thresh, stop = None, None, None
+        if index < F:
+            feature = index
+        elif index < (F + THRESH_SIZE):
+            thresh_index = index - F
+            thresh = discretize(thresh_index, buckets=THRESH_SIZE)
+            b_size = bucket_size(0.0, 1.0, THRESH_SIZE)
+            thresh += random() * b_size
+        else:
+            assert index == F + THRESH_SIZE
+            stop = True
+        return (feature, thresh, stop)
 
 
 class Datasets:
@@ -433,6 +578,7 @@ class Datasets:
         inputs = [] # List[inputs]
         labels = [] # List[label_idx]
         causal_feat = choice(list(range(n_features)))
+        print("CAUSAL FEATURE", causal_feat)
         for _ in range(1000):
             inp = []
             for i in range(n_features):
@@ -491,9 +637,12 @@ class Tasks:
             cstate = ep.current()
             for node in cstate.tree.bfs():
                 print(node)
-            print("state encoding", cstate.encode())
-            print("f mask", cstate.f_mask())
-            print("b mask", cstate.b_mask())
+            fmask = cstate.f_mask().tolist()
+            bmask = cstate.b_mask().tolist()
+            print("mask lens", len(fmask), len(bmask))
+            print("state encoding", cstate.encode().tolist())
+            print("f mask", cstate.f_mask().tolist())
+            print("b mask", cstate.b_mask().tolist())
             print(ep.done())
 
         dataset = Datasets.simple(n_features=1, noise=0.10)
@@ -507,7 +656,11 @@ class Tasks:
             max_depth=1,
         )
         episode = env.spawn()
-        actions = [(0, 0.50)]
+        actions = [
+            (0, None, None),
+            (None, 0.50, None),
+        ]
+
         disp_step(episode)
         for action in actions:
             episode.step(action)

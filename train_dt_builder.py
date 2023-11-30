@@ -14,11 +14,15 @@ def evaluate_trained(trainer):
     for sample in samples:
         tree = sample.tree
         rew = Evaluation.evaluate_tree(tree, dataset)
-        harvest.append((rew, tree.root.split_threshold))
+        harvest.append((
+            rew,
+            tree.root.split_feature,
+            tree.root.split_threshold
+        ))
 
     harvest.sort(key=lambda x: x[0], reverse=True)
-    for rew, sp in harvest[:30]:
-        print(rew, sp)
+    for rew, feat, thresh in harvest[:30]:
+        print(rew, feat, thresh)
 
     print("\nBest", harvest[0])
 
@@ -26,7 +30,7 @@ def evaluate_trained(trainer):
 if __name__ == "__main__":
     # Choose/configure environment
 
-    dataset = Datasets.simple(n_features=1, noise=0.10)
+    dataset = Datasets.simple(n_features=10, noise=0.10)
     env = DTBuilderEnv(
         dataset=dataset,
         max_depth=1,
@@ -34,6 +38,10 @@ if __name__ == "__main__":
 
     # Train Model
     trainer = Trainer(env=env)
-    trainer.train(n_episodes=4000)
+    trainer.train(
+        n_episodes=5000,
+        batch_size=8,
+        r_temp=0.60,
+    )
     evaluate_trained(trainer)
     trainer.dashboard()
