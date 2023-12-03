@@ -1,5 +1,6 @@
-from dataclasses import dataclass
-import math
+from collections import deque
+from dataclasses import dataclass, field
+# import math
 from typing import (
     Any,
     List,
@@ -16,6 +17,8 @@ from torch.distributions.categorical import Categorical
 from torchsummary import summary
 import matplotlib.pyplot as pp
 import numpy as np
+
+from pqueue import PriorityQueue
 
 
 enu = enumerate
@@ -34,6 +37,14 @@ def mask_logits(logits: Tensor, mask: Tensor) -> Tensor:
     )
 
 
+def mask_probs(probs: Tensor, mask: Tensor) -> Tensor:
+    return torch.where(
+        mask, # condition (mask in this case)
+        probs,
+        torch.tensor(0.0, dtype=probs.dtype), # set to really small number
+    )
+
+
 def ema(x: List[Number], a=0.10) -> List[Number]:
     res = [x[0]]
     for val in x[1:]:
@@ -42,13 +53,25 @@ def ema(x: List[Number], a=0.10) -> List[Number]:
     return res
 
 
-def dither(cat: Categorical, temp=1.0, eps=0.0) -> Categorical:
+def dither(
+    cat: Categorical,
+    temp=1.0,
+    eps=0.0,
+    mask=None,
+) -> Categorical:
+
     # Temper the probs
+    # XXX: BUG: Still need to mask these
     probs = torch.softmax(cat.logits / temp, dim=-1)
 
     # Calc uniform probs
     n_outcomes = cat.probs.size()[0]
-    unif_probs = torch.ones(n_outcomes) / n_outcomes
+    valid_outcomes = n_outcomes
+    if mask is not None:
+        valid_outcomes = mask.sum()
+    unif_probs = torch.ones(n_outcomes) / valid_outcomes
+    if mask is not None:
+        unif_probs = mask_probs(unif_probs, mask)
 
     # Apply uniform probs to tempered probs
     probs = ((1 - eps) * probs) + (eps * unif_probs)
@@ -125,14 +148,43 @@ class Batch:
 @dataclass
 class Trainer:
     env: Any
-    model: Any = None
-    samples: List[State] = None
-    batch_info: List[BatchInfo] = None
+    codec: Any
+
+    # Attributes for training run
+    model: Any = field(init=False)
+    samples: List[State] = field(init=False)
+    harvest: PriorityQueue = field(init=False)
+    batch_info: List[BatchInfo] = field(init=False)
 
     def __post_init__(self):
         self.model = None
-        self.samples = []
+        self.samples = deque()
+        self.harvest = PriorityQueue.empty()
         self.batch_info = []
+
+    def add_sample(self, sample, reward):
+        # Add to rolling window of samples
+        self.samples.append(sample)
+        if len(self.samples) > self.max_samples:
+            self.samples.popleft()
+
+        # Add to harvest
+        # - If full, then check if new sample is highest than lowest
+        #   on record. If it is, pop the lowest and push the new sample.
+        # - Else just add it.
+        if (len(self.harvest) + 1) > self.max_harvest:
+            lowest_reward, _ = self.harvest.peek()
+            if reward > lowest_reward:
+                self.harvest.pop()
+                self.harvest.push((reward, sample))
+        else:
+            self.harvest.push((reward, sample))
+
+    def best_samples(self):
+        # x[1] is entry counter in pqueue
+        best_samples = [(x[0], x[2]) for x in self.harvest.queue]
+        best_samples.sort(key=lambda x: x[0], reverse=True)
+        return best_samples
 
     def policy_info(self, step, logits, direction) -> Namespace:
         '''
@@ -144,12 +196,12 @@ class Trainer:
         assert direction in ("f", "b")
         if direction == "f":
             action = step.action_out
-            mask = step.state.f_mask()
+            mask = self.codec.f_mask(step.state)
         else:
             action = step.action_in
-            mask = step.state.b_mask()
+            mask = self.codec.b_mask(step.state)
         P_valid_action = Categorical(logits=mask_logits(logits, mask))
-        action_idx = torch.tensor(self.env.to_action_idx(action)).int()
+        action_idx = torch.tensor(self.codec.to_action_idx(action)).int()
         return Namespace(
             log_prob=P_valid_action.log_prob(action_idx),
             entropy=P_valid_action.entropy(),
@@ -170,7 +222,8 @@ class Trainer:
             final_t = episode.n_steps() - 1
             for step in episode.steps():
                 info.steps += 1
-                pf_logits, pb_logits = self.model(step.state.encode())
+                enc_state = self.codec.encode(step.state)
+                pf_logits, pb_logits = self.model(enc_state)
 
                 # Forward probs
                 # - Only accumulate for [first, last) state
@@ -189,10 +242,16 @@ class Trainer:
             # Reward for episode
             # - Accumulate for each episode
             #   - Reward may be tempered, but report the raw reward.
-            reward = episode.reward()
+            reward = episode.reward
             info.reward += reward
             info.max_reward = max(reward, info.max_reward)
             final_reward = reward**(1/r_temp)
+
+            # Track sample
+            self.add_sample(
+                sample=episode.current().clone(),
+                reward=reward,
+            )
 
             # Episode loss
             # XXX: better or worse to have loss divided by batch size?
@@ -210,15 +269,24 @@ class Trainer:
         eps=0.0,
         grad_clip=1e6,
         r_temp=1,
+        mlp_hidden=256,
+        mlp_layers=2,
+        max_samples=2000,
+        max_harvest=500,
     ):
+        self.max_samples = max_samples
+        self.max_harvest = max_harvest
+
         # Settings
         device = torch.device("cpu")
         n_batches = n_episodes // batch_size
 
         # Model
         self.model = TrajBalMLP(
-            input_dim=self.env.encoded_state_size(),
-            output_dim=self.env.encoded_action_size(),
+            input_dim=self.codec.encoded_state_size(),
+            output_dim=self.codec.encoded_action_size(),
+            hidden_dim=mlp_hidden,
+            n_hidden_layers=mlp_layers,
         )
         self.model.to(device)
 
@@ -236,14 +304,22 @@ class Trainer:
                 episode = self.env.spawn()
                 while not episode.done():
                     state = episode.current()
-                    pf_logits, _ = self.model(state.encode())
-                    P_valid_action = Categorical(logits=mask_logits(pf_logits, state.f_mask()))
-                    P_valid_action = dither(P_valid_action, temp=temp, eps=eps)
+                    enc_state = self.codec.encode(state)
+                    pf_logits, _ = self.model(enc_state)
+                    fmask = self.codec.f_mask(state)
+                    P_valid_action = Categorical(
+                        logits=mask_logits(pf_logits, fmask)
+                    )
+                    P_valid_action = dither(
+                        P_valid_action,
+                        temp=temp,
+                        eps=eps,
+                        mask=fmask,
+                    )
                     action_index = P_valid_action.sample()
-                    action = self.env.to_action(action_index.item())
+                    action = self.codec.to_action(action_index.item())
                     episode.step(action)
                 batch.append(episode)
-                self.samples.append(episode.current().clone())
 
             # Update Model
             # - Get target policy Pf/Pb/R quantities
@@ -261,7 +337,8 @@ class Trainer:
             maxR = max(maxR, batch.info.max_reward)
             pbar.set_postfix({
                 "loss": loss.item(),
-                "z": math.exp(self.model.logZ.item()),
+                # "z": math.exp(self.model.logZ.item()),
+                "logZ": self.model.logZ.item(),
                 "maxR": maxR,
             })
 
@@ -274,7 +351,7 @@ class Trainer:
 
         # ys
         loss = [x.loss.item() for x in self.batch_info]
-        loss_ema = ema(loss)
+        loss_ema = ema(loss, a=0.05)
         logZ = [x.logZ for x in self.batch_info]
         batch_maxR = [x.max_reward for x in self.batch_info]
         maxR = []
@@ -299,7 +376,8 @@ class Trainer:
         # ax[0].legend()
 
         pp.sca(ax[1])
-        pp.plot(episodes, np.exp(logZ))
+        pp.plot(episodes, logZ)
+        # pp.plot(episodes, np.exp(logZ))
         pp.ylabel('Estimated Z')
         # ax[1].legend()
 

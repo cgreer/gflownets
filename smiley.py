@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import cached_property
 from typing import (
     Any,
     List,
@@ -133,6 +134,7 @@ class Episode:
             steps.append(step)
         return steps
 
+    @cached_property
     def reward(self) -> float:
         if not self.done():
             return None
