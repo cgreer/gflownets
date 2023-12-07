@@ -3,7 +3,7 @@ A Basic GFlowNet Setup
 
 ![Training Dash](./img/training_dash.png)
 
-## About
+## Overview
 
 `gflownets` implements a GFlowNet using the trajectory balance loss on the [Smiley Environment](https://colab.research.google.com/drive/1fUMwgu2OhYpQagpzU5mhe9_Esib3Q2VR).
 
