@@ -130,6 +130,9 @@ class TreeNode:
             fail_id=self.fail_id,
         )
 
+    def size(self):
+        return self.selections.sum()
+
     def split_choices(self, feature):
         '''
         Lower part of range can be either open/closed. Higher part
@@ -283,7 +286,7 @@ class Tree:
 
         # Create child partitions
         # - Each child's partition is a subset of split node
-        # - Split node will ALWAYS have a partiion
+        # - Split node will ALWAYS have a partition
         assert split_node.partition is not None
         T = THRESH_SIZE
         child_nodes = [pass_node, fail_node]
@@ -319,7 +322,13 @@ class Tree:
             node.outcomes = None
             node.partition = None
 
-    def info_gain(self, node_id: NodeID):
+    def gain(self, node_id: NodeID, weighted=False):
+        '''
+        :weighted - If true, weight the info gain of pre/post split by
+        the size of the node. I.e., the # of samples that are present
+        in the dataset this tree is training on.
+        '''
+        # Gather info necessary for computation
         node = self.nodes[node_id]
         node_size = sum(node.outcomes)
         assert node.split
@@ -338,9 +347,13 @@ class Tree:
         fail_ent = self.entropy(fail_node.id)
         assert fail_size > 0
 
+        # Calculate final gain
         pre_split = self.entropy(node.id)
         post_split = (pass_weight * pass_ent) + (fail_weight * fail_ent)
-        return Calculations.info_gain(pre_split, post_split)
+        gain = Calculations.info_gain(pre_split, post_split)
+        if weighted:
+            gain = node_size * gain
+        return gain
 
     def entropy(self, node_id: NodeID):
         node = self.nodes[node_id]
@@ -391,7 +404,7 @@ class Tree:
                     return True
 
             # Split gain isn't >= cutoff
-            gain = self.info_gain(el.id) # Gain must exist now since children have data
+            gain = self.gain(el.id) # Gain must exist now since children have data
             if gain < cutoff:
                 return True
             return False
@@ -467,6 +480,17 @@ class Tree:
     def size(self):
         '''Size of active tree'''
         return len(self.bfs())
+
+    def utilized_features(self):
+        '''
+        The unique # of features used across all split points.
+        '''
+        feats = set()
+        for node in self.bfs():
+            if not node.split:
+                continue
+            feats.add(node.feature)
+        return feats
 
     def traversal(self, x):
         trav = [self.root]
@@ -550,31 +574,49 @@ class Tree:
                 thresh=node.thresh,
             )
 
-    def leaf_estimate(self, leaf):
-        assert isinstance(leaf.outcomes, np.ndarray)
-        if leaf.outcomes.sum() <= 0:
-            # print("WARNING: 0-count leaf! Uniform estimate")
-            n_outcomes = len(leaf.outcomes)
+    def node_estimate(self, node):
+        assert isinstance(node.outcomes, np.ndarray)
+        if node.outcomes.sum() <= 0:
+            # print("WARNING: 0-count node! Uniform estimate")
+            n_outcomes = len(node.outcomes)
             est = [1.0 / n_outcomes] * n_outcomes
             est = np.array(est, 'float')
         else:
-            est = leaf.outcomes / leaf.outcomes.sum()
+            est = node.outcomes / node.outcomes.sum()
         return est
 
     def estimate(self, x):
         # XXX: Dirichlet Smoothing?
         # - Hierarchichal updates or just one update?
         leaf = self.traverse(x)
-        return self.leaf_estimate(leaf)
+        return self.node_estimate(leaf)
 
     def estimate_batch(self, X):
         # XXX: Dirichlet Smoothing?
         # - Hierarchichal updates or just one update?
         estimates = [] # [(sel, est)]
         for leaf, sel in self.traverse_batch(X):
-            est = self.leaf_estimate(leaf)
+            est = self.node_estimate(leaf)
             estimates.append((sel, est))
         return estimates
+
+    def accuracy(self):
+        '''
+        Compute accuracy of full tree
+        '''
+        dataset = (self.observations, self.labels)
+        return Evaluation.accuracy(self, dataset)
+
+    def node_accuracy(self, node_id):
+        '''
+        Compute accuracy of data assigned to node :node_id
+        '''
+        obs, labels = self.node_dataset(node_id=node_id)
+        P_label = self.node_estimate(self.nodes[node_id])
+        est = np.argmax(P_label)
+        n_correct = (labels == est).sum()
+        acc = n_correct / len(obs)
+        return acc
 
     def is_valid(self):
         '''
@@ -596,6 +638,75 @@ class Tree:
             if len(coverage[feature]) != THRESH_SIZE:
                 return False
         return True
+
+    def node_dataset(self, node_id):
+        # Get obs/labels for just this node
+        node = self.nodes[node_id]
+        return (
+            self.observations[node.selections],
+            self.labels[node.selections],
+        )
+
+    def thresh_info(self, node_id, n_features: int):
+        T = THRESH_SIZE
+        node = self.nodes[node_id]
+        infos = {}
+        obs, labels = self.node_dataset(node_id)
+        for feat in range(n_features):
+            lower, higher = 0, T
+            if feat in node.partition:
+                t_range = node.partition[feat]
+                lower, higher = t_range.left.value, t_range.right.value
+            infos[feat] = []
+            for thresh in range(T):
+                active = False
+                min_val = None
+                max_val = None
+                size = None
+                n_pos = None
+                ratio = None
+                if lower <= thresh < higher:
+                    active = True
+
+                    # Select rows that match feat/thresh range
+                    # XXX: Swap out with proper feature ranges
+                    # XXX: Do proper open/closed ranges
+                    min_val = discretize(thresh, min_value=0.0, max_value=1.0, buckets=T)
+                    max_val = discretize(thresh + 1, min_value=0.0, max_value=1.0, buckets=T)
+                    sel = (obs[:, feat] >= min_val) & (obs[:, feat] <= max_val)
+
+                    # Calculate ratio
+                    size = sel.sum()
+                    n_pos = labels[sel].sum() # XXX: Make multiclass
+                    if size > 0:
+                        ratio = n_pos / size
+
+                x = Record(
+                    active=active,
+                    min_val=min_val,
+                    max_val=max_val,
+                    size=size,
+                    n_pos=n_pos,
+                    ratio=ratio,
+                )
+                infos[feat].append(x)
+        return infos
+
+    def scatterplot(self, node_id):
+        import seaborn
+        import matplotlib.pyplot as pp
+        import pandas as pd
+
+        # Convert to dataframe (needed for seaborn)
+        dataset = self.node_dataset(node_id)
+        col_names = [str(i) for i in range(len(dataset[0][0]))]
+        df_X = pd.DataFrame(dataset[0], columns=col_names)
+        df_y = pd.DataFrame(dataset[1], columns=['Label'])
+        df = pd.concat([df_X, df_y], axis=1)
+
+        # plot
+        seaborn.pairplot(df, hue="Label")
+        pp.show()
 
     def display(self):
         # DFS hierarchy
@@ -623,6 +734,49 @@ class Tree:
                 continue
             stack.append(self.nodes[node.fail_id])
             stack.append(self.nodes[node.pass_id])
+
+    def game_display(self, n_features):
+        '''
+        Info a human needs to play the "Build a DT" game.
+        '''
+        # Tree Info
+        tree_acc = self.accuracy()
+        n_nodes = self.size()
+        n_ufeats = len(self.utilized_features())
+        n_leaves = len(self.leaves())
+
+        rprint("\n[bold green]Tree[/bold green]")
+        print("accuracy:", round(tree_acc, 2))
+        print("nodes:", n_nodes)
+        print("leaves:", n_leaves)
+        print("utilized features:", n_ufeats)
+        self.display()
+
+        # Node Info
+        rprint("\n[bold green]Nodes[/bold green]")
+        for node in self.bfs():
+            # node_acc = self.node_accuracy(node_id)
+            partition = node.partition
+            leaf_tag = ""
+            if self.leaf(node.id):
+                leaf_tag = " [bold yellow]LEAF[/bold yellow]"
+
+            rprint("\nNode: " + str(node.id) + leaf_tag)
+            print("acc:", round(self.node_accuracy(node.id), 3))
+            print("size:", node.size())
+            print("partition:", partition)
+            # self.scatterplot(node.id)
+
+            tinfo = self.thresh_info(node.id, n_features)
+            thresh_header = ""
+            for i in range(THRESH_SIZE):
+                el = str(i)
+                thresh_header += el.ljust(3)
+            rprint("T:".ljust(6) + thresh_header)
+            for feat in tinfo:
+                view_info = [(i, x.ratio) for i, x in enu(tinfo[feat])]
+                view = FeatureRatioView.ratio_view(view_info)
+                rprint(f"f{feat}: ".ljust(6) + view)
 
 
 @dataclass
@@ -942,6 +1096,20 @@ class Env:
     def stop_action(self):
         return (None, None, None, True)
 
+    @classmethod
+    def pretty_action(Cls, action):
+        if action[0] is not None:
+            return f"Split node: {action[0]}"
+        elif action[1] is not None:
+            return f"Split feature: {action[1]}"
+        elif action[2] is not None:
+            thresh_val = discretize(action[2], 0.0, 1.0, THRESH_SIZE)
+            return f"Split thresh: {action[2]} {thresh_val}"
+        elif action[3] is not None:
+            return "STOP"
+        else:
+            raise KeyError()
+
     def n_features(self) -> int:
         return len(self.dataset[0][0])
 
@@ -1134,16 +1302,19 @@ class Models:
         n_features,
         max_depth,
         n_leaves=None,
+        dataset=None,
     ):
-        # Dataset is only needed so that the environment can
-        # understand n features. It doesn't influence the tree
-        # created here.
-        env = Env(
-            dataset=Datasets.single_factor(
+        # Build a dummy dataset if one isn't specified
+        if dataset is None:
+            dataset = Datasets.single_factor(
                 n_features=n_features,
                 noise=0.10,
                 N=1,
-            ),
+            )
+
+        # Build tree
+        env = Env(
+            dataset=dataset,
             max_depth=max_depth,
         )
         episode = env.spawn()
@@ -1324,7 +1495,7 @@ class HaystackTask:
         for node in self.tree.bfs():
             if not node.split:
                 continue
-            print("info gain:", self.tree.info_gain(node.id))
+            print("info gain:", self.tree.gain(node.id))
 
         print("\nPartitions:")
         for node in self.tree.bfs():
@@ -1334,7 +1505,7 @@ class HaystackTask:
                 print("outcomes:", node.outcomes)
                 print("entropy:", self.tree.entropy(node.id))
                 if node.parent is not None:
-                    print("parent gain:", self.tree.info_gain(node.parent))
+                    print("parent gain:", self.tree.gain(node.parent))
         print()
 
         n_inputs = len(self.train[0])
@@ -1342,6 +1513,39 @@ class HaystackTask:
         print("ratio", tot_positive / n_inputs)
 
         print("True tree acc:", self.test_acc)
+
+
+class FeatureRatioView:
+
+    @classmethod
+    def to_color(Cls, val):
+        if val is None:
+            return "#555555"
+        red = "00"
+        green = "00"
+        if val <= 0.50:
+            rval = 0.50 - val
+            red = hex(round(255 * rval))[-2:]
+        else:
+            gval = val - 0.50
+            green = hex(round(255 * gval))[-2:]
+        return "#" + red + green + "00"
+
+    @classmethod
+    def ratio_view(Cls, vals):
+        view = ""
+        for thresh, val in vals:
+            if val is None:
+                sval = "  "
+            else:
+                val = min(val, 0.99)
+                sval = str(round(val * 100))
+                if len(sval) < 2:
+                    sval = "0" + sval
+            col = Cls.to_color(val)
+            cell = f"[white on {col}]{sval} [/white on {col}]"
+            view += cell
+        return view
 
 
 class Tasks:
@@ -1595,6 +1799,7 @@ class Tasks:
             tree = Models.random_tree(
                 n_features=n_features,
                 max_depth=max_depth,
+                dataset=dataset,
             )
             # Tree sanity check
             if not tree.is_valid():
@@ -1672,6 +1877,49 @@ class Tasks:
         acc = Evaluation.accuracy(tree, eval_dataset)
         print(acc)
 
+    def tree_inspection(self):
+        # Generate a dataset/tree
+        n_features = 2
+        max_depth = 2
+        force_leaves = 4 # force 4 leaves
+        observations, labels = Datasets.single_factor(
+            n_features=n_features,
+            noise=0.10,
+            N=3000,
+        )
+        dataset = (observations, labels)
+        tree = Models.random_tree(
+            n_features=n_features,
+            max_depth=max_depth,
+            n_leaves=force_leaves,
+            dataset=dataset,
+        )
+
+        # Tree Info
+        tree.game_display(n_features=n_features)
+
+    def check_colors(self):
+        rprint("[rgb(100, 0, 0)]hello[/rgb(100, 0, 0)]")
+        red = "[white on #d70000]0 1 [/white on #d70000]"
+        black = "[white on #000000]2 3 [/white on #000000]"
+        green = "[white on #00d700]4 4 [/white on #00d700]"
+        rprint(red + black + green)
+
+        # Make a fake thresh label ratios
+        x = [None] * 10
+        x[5] = 0.0
+        x[6] = 0.20
+        x[7] = 0.40
+        x[8] = 0.60
+        x[9] = 0.80
+        x[9] = 1.00
+        print(x)
+        print()
+
+        # Make view
+        ratios = list(enu(x))
+        rprint(FeatureRatioView.ratio_view(ratios))
+
 
 if __name__ == "__main__":
     # Tasks().check_evaluate()
@@ -1688,5 +1936,7 @@ if __name__ == "__main__":
     # Tasks().check_tree_display()
     # Tasks().debug_random_tree()
     # Tasks().check_evaluate_batch()
-    Tasks().check_random_trees()
+    # Tasks().check_random_trees()
     # Tasks().test_accuracy()
+    # Tasks().check_colors()
+    Tasks().tree_inspection()

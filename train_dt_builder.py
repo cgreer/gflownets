@@ -11,6 +11,7 @@ from types import SimpleNamespace as Record
 import numpy as np
 import matplotlib.pyplot as pp
 from sklearn.metrics import accuracy_score
+from rich import print as rprint
 
 from dt_builder import (
     Env as DTBuilderEnv,
@@ -370,40 +371,54 @@ class HumanTree:
             dataset=dataset,
             max_depth=max_depth,
         )
+        n_features = env.n_features()
         training_logs = []
         best_acc = 0.0
         best_tree = None
+        user_quit = False
         for ep_i in range(n_episodes):
+            if user_quit:
+                break
+
             episode = env.spawn()
             while not episode.done():
-                print("\nEpisode:", episode.n_steps())
+                rprint(f"\n\n[green]EPISODE {ep_i} (step {episode.n_steps()})[/green]")
                 v_actions = episode.current().valid_f_actions()
 
+                # Display state
+                s = episode.current()
+                rprint("\n[green]Game State[/green]")
+                print("Working split:", s.split)
+                print("Stopped:", s.stopped)
+                s.tree.game_display(n_features=n_features)
+
                 # Show user valid actions
-                print("\nActions:")
+                print("\n\nACTIONS:")
                 for i, action in enu(v_actions):
-                    print(i, action)
+                    # print(i, action)
+                    print("  ", str(i) + " -", env.pretty_action(action))
+                print("  ", "quit")
 
                 # Get valid choice
                 valid_resps = set([str(i) for i in range(len(v_actions))])
                 valid_resps.add("quit")
-                print(valid_resps)
                 while True:
                     user_resp = input("\nAction? ").strip()
                     if user_resp not in valid_resps:
                         print("Invalid action:", user_resp)
                         continue
-                    if user_resp == "quit":
-                        user_choice = "quit"
-                    else:
-                        user_choice = int(user_resp.strip())
                     break
 
-                # Quit if done
-                if user_choice == "quit":
+                # User wants to quit?
+                # - Quit this episode. Session will quit next loop.
+                if user_resp == "quit":
+                    user_quit = True
                     break
 
-                action = v_actions[user_choice]
+                # User chose valid action
+                act_idx = int(user_resp)
+                action = v_actions[act_idx]
+                print("Chose", action)
                 # action = choice(v_actions)
                 episode.step(action)
 
@@ -413,6 +428,9 @@ class HumanTree:
             if acc > best_acc:
                 best_tree = tree
                 best_acc = acc
+            print("\nFinal tree:")
+            tree.display()
+            print("\nacc:", acc)
 
             # Training log
             datapoint = Record()
@@ -619,15 +637,36 @@ if __name__ == "__main__":
     ################
     # Human Trainer
     ################
-    N = 2500
-    n_episodes = 10
-    max_depth = 2
-    task = HaystackTask.generate(N=N, n_partitions=2, n_features=2, max_depth=max_depth)
-    task.display()
+    N = 3000
+    n_episodes = 100 # Can quit whenever..
+    max_depth = 5
+    n_features = 4
+    n_partitions = 9
+
+    # Generate hidden tree
+    task = HaystackTask.generate(
+        N=N,
+        n_partitions=n_partitions,
+        n_features=n_features,
+        max_depth=max_depth,
+    )
+
+    # Have human train on task
     human_tree = HumanTree.train(
         task.train,
         max_depth=max_depth,
         n_episodes=10,
     )
     human_acc = human_tree.evaluate(task.test)
-    print("Test acc (human):", human_acc)
+
+    # Train CART on task
+    cart = CART.train(task.train)
+    cart_acc = cart.evaluate(task.test)
+
+    rprint("\n[green]True Tree[/green]")
+    task.display()
+
+    rprint("\n[green]Scores[/green]")
+    print("Test acc (human):".ljust(20), human_acc)
+    print("Test acc (CART):".ljust(20), cart_acc)
+    print()
