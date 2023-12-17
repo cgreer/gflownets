@@ -7,7 +7,7 @@ from typing import (
     Union,
 )
 from types import SimpleNamespace as Namespace
-
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 import torch
 import torch.nn as nn
@@ -16,21 +16,27 @@ from torch.distributions.categorical import Categorical
 from torchsummary import summary
 import matplotlib.pyplot as pp
 import numpy as np
+import os
+import json
 
 
 enu = enumerate
 NEG_INF = float("-inf")
 Tensor = torch.Tensor
+Device = torch.device
 Number = Union[int, float]
 State = Any # State from env file (that is terminal)
 Episode = Any # Episode from an env file
 
 
-def mask_logits(logits: Tensor, mask: Tensor) -> Tensor:
+def mask_logits(logits: Tensor, mask: Tensor, device: Device) -> Tensor:
+    mask = mask.to(device) 
+    logits = logits.to(device)
+    small_num_tensor = torch.tensor(-100.0, dtype=logits.dtype, device=device)  
     return torch.where(
-        mask, # condition (mask in this case)
+        mask,  # condition (mask in this case)
         logits,
-        torch.tensor(-100.0, dtype=logits.dtype), # set to really small number
+        small_num_tensor,  # set to really small number
     )
 
 
@@ -41,14 +47,37 @@ def ema(x: List[Number], a=0.10) -> List[Number]:
         res.append(xp)
     return res
 
+def mask_probs(probs: Tensor, mask: Tensor, device: Device) -> Tensor:
+    mask = mask.to(device) 
+    probs = probs.to(device)
+    zero_tensor = torch.tensor(0.0, dtype=probs.dtype, device=device)  # Updated to ensure the tensor is on DEVICE
+    return torch.where(
+        mask,  # condition (mask in this case)
+        probs,
+        zero_tensor,  # set to zero
+    )
 
-def dither(cat: Categorical, temp=1.0, eps=0.0) -> Categorical:
+def dither(
+    cat: Categorical,
+    device: Device,
+    temp=1.0,
+    eps=0.1,
+    mask=None,
+) -> Categorical:
+
     # Temper the probs
+    # XXX: BUG: Still need to mask these
     probs = torch.softmax(cat.logits / temp, dim=-1)
 
     # Calc uniform probs
     n_outcomes = cat.probs.size()[0]
-    unif_probs = torch.ones(n_outcomes) / n_outcomes
+    valid_outcomes = n_outcomes
+    if mask is not None:
+        valid_outcomes = mask.sum()
+    unif_probs = torch.ones(n_outcomes) / valid_outcomes
+    unif_probs = unif_probs.to(device)  # Ensure uniform probs are on DEVICE
+    if mask is not None:
+        unif_probs = mask_probs(unif_probs, mask, device)
 
     # Apply uniform probs to tempered probs
     probs = ((1 - eps) * probs) + (eps * unif_probs)
@@ -61,10 +90,14 @@ class TrajBalMLP(nn.Module):
         self,
         input_dim: int,
         output_dim: int,
+        device: Device,
         hidden_dim: Optional[int] = 256,
         n_hidden_layers: Optional[int] = 2,
     ):
         super().__init__()
+
+        self.device = device
+
         activation = nn.ReLU
 
         # logZ
@@ -81,9 +114,10 @@ class TrajBalMLP(nn.Module):
         self.pb = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x):
-        x = self.shared(x)
-        pf = self.pf(x)
-        pb = self.pb(x)
+        x = x.to(self.device)  # Ensure input tensor is on DEVICE
+        x_1 = self.shared(x)
+        pf = self.pf(x_1)
+        pb = self.pb(x_1)
         return pf, pb
 
     def param_sets(self):
@@ -120,11 +154,23 @@ class Batch:
 
     def size(self):
         return len(self.episodes)
+    
+    
+class EpisodeDataset(Dataset):
+    def __init__(self, episodes):
+        self.episodes = episodes
+
+    def __len__(self):
+        return len(self.episodes)
+
+    def __getitem__(self, idx):
+        return self.episodes[idx]
 
 
 @dataclass
 class Trainer:
     env: Any
+    device: Device
     model: Any = None
     samples: List[State] = None
     batch_info: List[BatchInfo] = None
@@ -148,14 +194,14 @@ class Trainer:
         else:
             action = step.action_in
             mask = step.state.b_mask()
-        P_valid_action = Categorical(logits=mask_logits(logits, mask))
-        action_idx = torch.tensor(self.env.to_action_idx(action)).int()
+        P_valid_action = Categorical(logits=mask_logits(logits, mask, self.device))
+        action_idx = torch.tensor(self.env.to_action_idx(action), device=self.device).int()
         return Namespace(
             log_prob=P_valid_action.log_prob(action_idx),
             entropy=P_valid_action.entropy(),
         )
 
-    def process_batch(self, batch: List[Episode]):
+    def process_batch(self, batch: List[Episode], batch_size=8):
         '''
         - Compute trajbal loss
             - sum log of pf/pb for each episode
@@ -165,8 +211,8 @@ class Trainer:
         info = batch.info
         for episode in batch.episodes:
             info.size += 1
-            log_pf = torch.tensor(0).float()
-            log_pb = torch.tensor(0).float()
+            log_pf = torch.tensor(0).float().to(self.device)
+            log_pb = torch.tensor(0).float().to(self.device)
             final_t = episode.n_steps() - 1
             for step in episode.steps():
                 info.steps += 1
@@ -189,6 +235,7 @@ class Trainer:
             # Reward for episode
             # - Accumulate for each episode
             rew = episode.reward()
+            #print(rew)
             info.reward += rew
             info.max_reward = max(rew, info.max_reward)
 
@@ -198,26 +245,49 @@ class Trainer:
             ep_loss = (self.model.logZ + log_pf - logR - log_pb).pow(2) / batch.size()
             info.loss += ep_loss
 
+    def checkpoint_model(self, checkpoint_id, step, base_directory):
+        """
+        Saves the model and a json file with step number and checkpoint number.
+        :param checkpoint_number: The number of the checkpoint.
+        :param base_directory: The base directory to save the checkpoint.
+        """
+
+        checkpoint_dir = os.path.join(base_directory, f"checkpoint_{checkpoint_id}")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        model_path = os.path.join(checkpoint_dir, "model.pth")
+        torch.save(self.model.state_dict(), model_path)
+
+        checkpoint_info = {
+            "step_number": step,
+            "checkpoint_id": checkpoint_id
+        }
+        with open(os.path.join(checkpoint_dir, "checkpoint_info.json"), 'w') as f:
+            json.dump(checkpoint_info, f)
+
     def train(
         self,
         n_episodes=5000,
-        batch_size=16,
-        lr_model=3e-4,
-        lr_Z=1e-1,
+        batch_size=32,
+        lr_model=0.00112,
+        lr_Z=0.0634,
         temp=1.0,
-        eps=0.0,
-        grad_clip=1e6,
+        eps=0.00534,
+        grad_clip=1e4,
+        checkpoint_interval=50,
+        base_directory="model_checkpoints"
     ):
         # Settings
-        device = torch.device("cpu")
         n_batches = n_episodes // batch_size
+        print(self.device)
 
         # Model
         self.model = TrajBalMLP(
             input_dim=self.env.encoded_state_size(),
             output_dim=self.env.encoded_action_size(),
+            device=self.device,
         )
-        self.model.to(device)
+        self.model.to(self.device)
 
         # Train
         params = self.model.param_sets()
@@ -228,23 +298,43 @@ class Trainer:
         for batch_i in (pbar := tqdm(range(n_batches))):
             # Generate Batch
             batch = Batch()
+
             for _ in range(batch_size):
                 episode = self.env.spawn()
+
                 while not episode.done():
                     state = episode.current()
                     pf_logits, _ = self.model(state.encode())
-                    P_valid_action = Categorical(logits=mask_logits(pf_logits, state.f_mask()))
-                    P_valid_action = dither(P_valid_action, temp=temp, eps=eps)
+                    P_valid_action = Categorical(
+                        logits=mask_logits(pf_logits, state.f_mask(), self.device)
+                    )
+                    P_valid_action = dither(
+                        P_valid_action,
+                        temp=temp,
+                        eps=eps,
+                        mask=state.f_mask(),
+                        device=self.device,
+                    )
                     action_index = P_valid_action.sample()
                     action = self.env.to_action(action_index.item())
                     episode.step(action)
+                    # if episode.done():
+                    #     self.env.count_state_visits(state)
+
                 batch.append(episode)
                 self.samples.append(episode.current().clone())
+
+                if (batch_i + 1) % checkpoint_interval == 0:
+                    self.checkpoint_model(checkpoint_id=int((batch_i + 1)/checkpoint_interval), step = batch_size*len(self.batch_info), base_directory=base_directory)
+
+                is_last_batch = (batch_i == n_batches - 1)
+                if is_last_batch:
+                    self.checkpoint_model(checkpoint_id="last", step = batch_size*len(self.batch_info), base_directory=base_directory)
 
             # Update Model
             # - Get target policy Pf/Pb/R quantities
             optimizer.zero_grad()
-            self.process_batch(batch)
+            self.process_batch(batch, batch_size=batch_size)
             loss = batch.info.loss
             loss.backward()
             grad_norm = clip_grad_norm_(self.model.parameters(), grad_clip)
