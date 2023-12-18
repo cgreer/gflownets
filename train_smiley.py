@@ -11,7 +11,7 @@ def evaluate_trained(trainer):
 
     # Collect face counts
     counts = defaultdict(int)
-    for samp in samples[-2000:]:
+    for samp in list(samples)[-2000:]: # deque, so list
         counts[tuple(samp.features)] += 1
 
     # Face distribution
@@ -48,7 +48,11 @@ if __name__ == "__main__":
     env = SmileyEnv(n_features=3)
 
     # Train Model
+    n_episodes = 5000
     trainer = Trainer(env=env)
-    trainer.train(n_episodes=10_000)
+    trainer.train(
+        n_episodes=n_episodes,
+        max_samples=n_episodes, # samples to keep
+    )
     evaluate_trained(trainer)
     trainer.dashboard()
