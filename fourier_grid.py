@@ -1,26 +1,27 @@
 import numpy as np
-import unittest
 import matplotlib.pyplot as plt
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (
     Any,
     List,
-    Tuple,
-    Optional,
 )
 from types import SimpleNamespace as Record
 import torch
 
 Tensor = torch.Tensor
+Matrix2D = np.array
 
 
 @dataclass
 class State:
-    features: List[int] # n binary features, None=unspecified
+    features: List[int] # [x, y, stop]
     H: int
 
     def clone(self) -> 'State':
-        return State(features=self.features[:], H=self.H)
+        return State(
+            features=self.features[:],
+            H=self.H,
+        )
 
     def terminal(self) -> bool:
         return self.features[-1] == 1
@@ -37,17 +38,35 @@ class State:
         Action mask for forwards actions
         - allowed = 1, disallowed = 0
         '''
-        mask = [1, 1, 1, 1, 1]  #[right, left, up, down, terminate]
-        if self.features[0] == self.H - 1:
-            mask[0] = 0
-        if self.features[0] == 0:
-            mask[1] = 0
-        if self.features[1] == self.H - 1:
-            mask[3] = 0
-        if self.features[1] == 0:
-            mask[2] = 0
+        # Stopped
+        # - Nothing to do...
+        # XXX: Should never be called?
         if self.features[-1] == 1:
-            mask[-1] = 0
+            mask = [0, 0, 0, 0, 0]  # [right, left, up, down, terminate]
+
+        # In progress
+        else:
+            mask = [1, 1, 1, 1, 1]  # [right, left, up, down, terminate]
+
+            # Left edge
+            # - Can't move left
+            if self.features[0] <= 0:
+                mask[1] = 0
+
+            # Right edge
+            # - Can't move right
+            if self.features[0] >= self.H - 1:
+                mask[0] = 0
+
+            # Top edge
+            # - Can't move up
+            if self.features[1] == 0:
+                mask[2] = 0
+
+            # Bottom edge
+            # - Can't move down
+            if self.features[1] == self.H - 1:
+                mask[3] = 0
         return torch.Tensor(mask).bool()
 
     def b_mask(self) -> Tensor:
@@ -55,43 +74,69 @@ class State:
         Action mask for backwards actions
         - allowed = 1, disallowed = 0
         '''
-        mask = [1, 1, 1, 1, 1]  ##[right, left, up, down, terminate]
-        if self.features[0] == self.H - 1:
-            mask[1] = 0
-        if self.features[0] == 0:
-            mask[0] = 0
-        if self.features[1] == self.H - 1:
-            mask[2] = 0
-        if self.features[1] == 0:
-            mask[3] = 0
-        if self.features[-1] == 0:
-            mask[-1] = 0
+        # Episode stopped
+        # - Only possible action is to undo terminate
+        if self.features[-1] == 1:
+            mask = [0, 0, 0, 0, 1]  # [right, left, up, down, terminate]
+
+        # Episode in progress
+        # - No way came from a stopped state
+        # - Some movements might not be possible if on edges.
+        else:
+            mask = [1, 1, 1, 1, 0]  # [right, left, up, down, terminate]
+
+            # Left edge
+            # - Right not possible
+            if self.features[0] <= 0:
+                mask[0] = 0
+
+            # Right edge
+            # - Left not possible
+            if self.features[0] >= self.H - 1:
+                mask[1] = 0
+
+            # Top edge
+            # - Down not possible
+            if self.features[1] == 0:
+                mask[3] = 0
+
+            # Bottom edge
+            # - Up not possible
+            if self.features[1] == self.H - 1:
+                mask[2] = 0
         return torch.Tensor(mask).bool()
 
 
 @dataclass
 class Episode:
-    def __init__(self, history: List[Any], H=4, reward_distribution=None, max_steps=1000):
-        self.history = history
-        self.H = H
-        self.reward_distribution = reward_distribution
-        self.max_steps = max_steps
+    history: List[Any] # [state, action, state, ...]
+    H: int
+    reward_distribution: Matrix2D
 
     def step(self, action: List[int]):
         state = self.history[-1]
         assert isinstance(state, State)
+
         # Add next (a,s) pair to history
-        state_p = state.clone() # [right, left, up, down, terminate]
+        state_p = state.clone()
+
+        assert sum(action) == 1, "Mutually exclusive!?"
+
         # [right, left, up, down, terminate]
-        if action[0] == 1 and state_p.features[0] < self.H - 1:
+        if action[0] == 1: # right
+            assert state_p.features[0] < self.H - 1
             state_p.features[0] += 1
-        if action[1] == 1 and state_p.features[0] > 0:
+        elif action[1] == 1: # left
+            assert state_p.features[0] > 0
             state_p.features[0] -= 1
-        if action[2] == 1 and state_p.features[1] > 0:
+        elif action[2] == 1: # up
+            assert state_p.features[1] > 0
             state_p.features[1] -= 1
-        if action[3] == 1 and state_p.features[1] < self.H - 1:
+        elif action[3] == 1: # down
+            assert state_p.features[1] < self.H - 1
             state_p.features[1] += 1
-        if action[4] == 1 and state_p.features[2] == 0:
+        elif action[4] == 1: # terminate
+            assert state_p.features[2] == 0
             state_p.features[2] = 1
 
         self.history.append(action)
@@ -101,8 +146,6 @@ class Episode:
         return self.history[-1]
 
     def done(self) -> bool:
-        if len(self.history) >= self.max_steps:
-            return True
         return self.history[-1].terminal()
 
     def n_steps(self) -> int:
@@ -122,32 +165,30 @@ class Episode:
         return steps
 
     def reward(self) -> float:
-        if self.history[-1].features[2] == 1 and self.done():
+        s = self.current()
+        if s.terminal():
             x1 = self.history[-1].features[0]
             x2 = self.history[-1].features[1]
             return self.reward_distribution[x2][x1]
-        if self.history[-1].features[2] == 0 and self.done():
-            return 0
-        else:
-            return None
+        return None
 
 
 @dataclass
 class Env:
+    H: int = 4
+    n: int = 1000
+    c: float = -0.50
+    d: float = 0.50
+    reward_distribution: Matrix2D = field(init=False)
 
-    def __init__(self, H=4, n=1000, c=-0.5, d=0.5, beta=1.5):
-        self.H = H
-        self.n = n
-        self.c = c
-        self.d = d
-        self.beta = beta
+    def __post_init__(self):
         self.reward_distribution = self.true_reward_distribution()
-        self.state_visits = np.zeros((self.H, self.H))
 
     def spawn(self) -> Episode:
-        initial_state = State(features=[0, 0, 0], H=64)
+        initial_state = State(features=[0, 0, 0], H=self.H)
         return Episode(
             history=[initial_state],
+            H=self.H,
             reward_distribution=self.reward_distribution,
         )
 
@@ -158,66 +199,50 @@ class Env:
         return 5 # right, left, up, down, terminate
 
     def to_action_idx(self, action: List[int]) -> int:
+        assert sum(action) == 1
         return action.index(1)
 
     def to_action(self, index: int) -> List[int]:
         action = [0, 0, 0, 0, 0]
         action[index] = 1
         return action
-    
-    def reward_calc(self, x):
-        x1 = x.features[0] 
-        x2 = x.features[1] 
+
+    def reward_calc(self, state):
+        x1 = state.features[0]
+        x2 = state.features[1]
         reward = 0
         for k in range(1, self.n + 1):
             reward += np.cos(2 * (4*k/1000) * np.pi * self.g(x1)) \
-            + np.sin(2 * (4*k/1000) * np.pi * self.g(x1)) \
-            + np.cos(2 * (4*k/1000) * np.pi * self.g(x2)) \
-            + np.sin(2 * (4*k/1000) * np.pi * self.g(x2))
+                + np.sin(2 * (4*k/1000) * np.pi * self.g(x1)) \
+                + np.cos(2 * (4*k/1000) * np.pi * self.g(x2)) \
+                + np.sin(2 * (4*k/1000) * np.pi * self.g(x2))
         return reward
-    
+
     def g(self, x):
         out = x * (self.d - self.c) / self.H + self.c
         return out
-    
+
     def true_reward_distribution(self) -> np.ndarray:
         """
-        Returns a 2D array representing the true reward distribution of the grid.
-        Each element in the array corresponds to the reward for that cell.
+        Returns a 2D array representing the true reward distribution
+        of the grid. Each element in the array corresponds to the
+        reward for that cell.
         """
         reward_distribution = np.zeros((self.H, self.H))
-
         for x in range(self.H):
             for y in range(self.H):
                 state = State(features=[x, y, 0], H=self.H)
                 reward_distribution[x, y] = self.reward_calc(state)
+        zero_shifted = reward_distribution - np.min(reward_distribution)
+        zero_shifted = np.maximum(zero_shifted, 0.0)
+        normalized = zero_shifted / zero_shifted.sum()
+        return normalized
 
-        min_val = np.min(reward_distribution)
-        max_val = np.max(reward_distribution)
-        normalized = (reward_distribution - min_val) / (max_val - min_val)
-
-        return np.power(normalized, self.beta)
-
-    def visualize_array(self, array):
-        """
-        Visualize a numpy array.
-
-        Parameters:
-        array (numpy.ndarray): A 64x64 numpy array.
-
-        Returns:
-        None
-        """
+    def plot_reward_distribution(self, array: Matrix2D):
         plt.imshow(array, cmap='gray', interpolation='nearest')
         plt.colorbar()
-        plt.title("Array Visualization")
+        plt.title("Reward Distribution")
         plt.show()
-    
-    def count_state_visits(self, state):
-        """
-        Count the number of times each state is visited.
-        """
-        self.state_visits[state.features[1]][state.features[0]] += 1
 
 
 class Tasks:
@@ -228,7 +253,12 @@ class Tasks:
         print()
         print(episode)
 
-        for action in ([0, 0, 0, 0, 0], [0, 1, 0, 0, 0], [1, 0, 0, 0, 0], [0, 0, 1, 0, 0], [0,0,0,1,0], [0,0,0,0,1]):
+        actions = (
+            [1, 0, 0, 0, 0], # right
+            [0, 0, 0, 1, 0], # down
+            [0, 0, 0, 0, 1], # stop
+        )
+        for action in actions:
             print("#############################")
             episode.step(action)
             print("state: ", episode.current())
@@ -237,7 +267,6 @@ class Tasks:
             print("backward mask: ", episode.current().b_mask())
             print("terminal: ", episode.done())
             print("reward: ", episode.reward())
-            
 
         print("\nSteps:")
         print("n steps:", episode.n_steps())
@@ -245,13 +274,34 @@ class Tasks:
             print(step)
         print()
 
+    def check_rand_episodes(self):
+        from random import choice
+        import time
+        env = Env(H=64)
+        env.plot_reward_distribution(env.reward_distribution)
+        st_time = time.time()
+        N = 10000
+        for _ in range(N):
+            ep = env.spawn()
+            while not ep.done():
+                v_actions = []
+                for i, el in enumerate(ep.current().f_mask()):
+                    if el >= 0.50:
+                        action = [0, 0, 0, 0, 0]
+                        action[i] = 1
+                        v_actions.append(action)
+                action = choice(v_actions)
+                ep.step(action)
+        elapsed = time.time() - st_time
+        print("elapsed:", elapsed)
+        print("rate:", round(N / elapsed, 2))
+
 
 if __name__ == "__main__":
-    Tasks().check_env()
-    env = Env()
-    episode = env.spawn()
+    # Tasks().check_env()
+    Tasks().check_rand_episodes()
+
+    # env = Env()
+    # episode = env.spawn()
     # print(episode.reward_distribution)
-    # env.visualize_array(env.reward_distribution)
-
-        
-
+    # env.plot_reward_distribution(env.reward_distribution)

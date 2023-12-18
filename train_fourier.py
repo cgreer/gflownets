@@ -1,6 +1,3 @@
-import argparse
-from collections import defaultdict
-import math
 import os
 import torch
 import numpy as np
@@ -8,40 +5,8 @@ import json
 import matplotlib.pyplot as plt
 from torch.distributions import Categorical
 
-from FourierEnv import Env as FourierEnvironment
-from smiley import Env as SmileyEnvironment
+from fourier_grid import Env as FourierGrid
 from traj_balance import Trainer, TrajBalMLP
-
-# Argument parser
-def parse_arguments():
-    parser = argparse.ArgumentParser(description='Trajectory Balancing Training Script')
-    
-    # Arguments for Trainer
-    parser.add_argument('--n_episodes', type=int, default=10000, help='Number of episodes')
-    parser.add_argument('--eps', type=float, default=0.1, help='Epsilon value for training')
-    parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
-    parser.add_argument('--temp', type=float, default=1, help='Temperature')
-    parser.add_argument('--save_dir', type=str, default='./model_checkpoints', help='Directory to save model checkpoints')
-
-    # GPU flag
-    parser.add_argument('--gpu', type=bool, default=False, help='Use GPU if available')
-
-    return parser.parse_args()
-
-def main():
-    args = parse_arguments()
-    print(args.gpu)
-
-    device = torch.device("cuda" if args.gpu and torch.cuda.is_available() else "cpu")
-    print("Using device: ", device)
-    env = FourierEnvironment()
-
-    trainer = Trainer(env=env, device=device)
-    trainer.train(n_episodes=args.n_episodes, eps=args.eps, batch_size=args.batch_size, temp=args.temp)
-    trainer.dashboard()
-
-    predicted, target = compare_predicted_to_target(env, device)
-    print(predicted)
 
 
 def evaluate_distribution(model_checkpoint_path, env, device, num_simulations=10000):
@@ -58,7 +23,6 @@ def evaluate_distribution(model_checkpoint_path, env, device, num_simulations=10
     termination_frequencies = np.zeros((env.spawn().H, env.spawn().H))
 
     for i in range(num_simulations):
-        #print("Simulation: ", i)
         episode = env.spawn()
         while not episode.done():
             state = episode.current()
@@ -66,10 +30,10 @@ def evaluate_distribution(model_checkpoint_path, env, device, num_simulations=10
             action_idx = Categorical(logits=pf_logits).sample().item()
             action = env.to_action(action_idx)
             episode.step(action)
-        
+
         terminal_state = episode.current()
         x, y, _ = terminal_state.features
-        termination_frequencies[x, y] += 1 
+        termination_frequencies[x, y] += 1
 
     return termination_frequencies
 
@@ -131,6 +95,7 @@ def evaluate_checkpoints(base_directory, env, device, num_simulations=5000):
 
     return step_numbers, l1_norms
 
+
 def compare_predicted_to_target(env, device, model_checkpoint_path="./model_checkpoints/checkpoint_last", num_simulations=2000):
     """
     Compare the predicted distribution to the target distribution.
@@ -158,7 +123,65 @@ def compare_predicted_to_target(env, device, model_checkpoint_path="./model_chec
     return predicted, target
 
 
+def to_empirical(states):
+    '''
+    Given some samples of episode terminal states, create an empirical
+    reward distribution.
+    '''
+    H = states[0].H
+    grid = np.zeros((H, H), 'float')
+    for state in states:
+        x, y = state.features[0], state.features[1]
+        grid[x, y] += 1.0
+    grid = grid / grid.sum()
+    return grid
+
+
+def target_error_figure(trainer, n_episodes, step, lb):
+    assert step < n_episodes
+
+    target = trainer.env.reward_distribution
+    info = []
+    for t in range(lb, n_episodes + 1, step):
+        rolling = trainer.samples[t-lb:t]
+        empirical = to_empirical(rolling)
+        error = np.abs(empirical - target).sum()
+        info.append((t, error))
+
+    print("episodes".ljust(10), "L1 Error")
+    for t, error in info:
+        print(
+            str(t).ljust(10),
+            error,
+        )
+
+    # Plot dist + final empirical
+    env.plot_reward_distribution(env.reward_distribution)
+    env.plot_reward_distribution(empirical)
+
+
 if __name__ == "__main__":
-    main()
+    env = FourierGrid(H=4)
 
+    n_episodes = 10000
 
+    trainer = Trainer(env=env)
+    trainer.train(
+        n_episodes=n_episodes,
+        batch_size=16,
+        lr_model=0.00236, # 0.00236 in paper
+        lr_Z=0.0695, # 0.00695 in paper
+        temp=1.046, # 1.0458 in paper
+        eps=0.006, # 0.00543 in paper
+    )
+    trainer.dashboard()
+
+    target_error_figure(
+        trainer,
+        n_episodes,
+        step=1000,
+        lb=3000,
+    )
+
+    # predicted, target = compare_predicted_to_target(env, device)
+    # print(predicted)
