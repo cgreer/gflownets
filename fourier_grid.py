@@ -119,10 +119,7 @@ class Episode:
 
         # Add next (a,s) pair to history
         state_p = state.clone()
-
         assert sum(action) == 1, "Mutually exclusive!?"
-
-        # [right, left, up, down, terminate]
         if action[0] == 1: # right
             assert state_p.features[0] < self.H - 1
             state_p.features[0] += 1
@@ -138,7 +135,6 @@ class Episode:
         elif action[4] == 1: # terminate
             assert state_p.features[2] == 0
             state_p.features[2] = 1
-
         self.history.append(action)
         self.history.append(state_p)
 

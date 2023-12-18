@@ -154,7 +154,8 @@ class Trainer:
         # Add to rolling window of samples
         self.samples.append(sample)
         if len(self.samples) > self.max_samples:
-            self.samples.popleft()
+            popped = self.samples.popleft() # noqa
+            del popped
 
     def policy_info(self, step, logits, direction) -> Namespace:
         '''
@@ -185,11 +186,13 @@ class Trainer:
         - Track stats (see BatchInfo)
         '''
         info = batch.info
+        t_steps = 0
         for episode in batch.episodes:
             info.size += 1
             log_pf = torch.tensor(0).float()
             log_pb = torch.tensor(0).float()
             final_t = episode.n_steps() - 1
+            t_steps += episode.n_steps()
             for step in episode.steps():
                 info.steps += 1
                 pf_logits, pb_logits = self.model(step.state.encode())
@@ -210,12 +213,8 @@ class Trainer:
 
             # Reward for episode
             # - Accumulate for each episode
-            rew = episode.reward()
-            info.reward += rew
-            info.max_reward = max(rew, info.max_reward)
-
-            #   - Reward may be tempered, but report the raw reward.
-            reward = episode.reward
+            # - Reward may be tempered, but report the raw reward.
+            reward = episode.reward()
             info.reward += reward
             info.max_reward = max(reward, info.max_reward)
             final_reward = reward**(1/r_temp)
@@ -232,6 +231,13 @@ class Trainer:
             ep_loss = (self.model.logZ + log_pf - logR - log_pb).pow(2) / batch.size()
             info.loss += ep_loss
 
+        print("steps / episode", t_steps / 16)
+        self.post_batch_hook()
+
+    def post_batch_hook(self):
+        if self.post_batch:
+            self.post_batch(self)
+
     def train(
         self,
         n_episodes=5000,
@@ -244,7 +250,12 @@ class Trainer:
         r_temp=1,
         mlp_hidden=256,
         mlp_layers=2,
+        max_samples=2000,
+        post_batch=None,
     ):
+        self.max_samples = max_samples
+        self.post_batch = post_batch
+
         # Settings
         device = torch.device("cpu")
         n_batches = n_episodes // batch_size
