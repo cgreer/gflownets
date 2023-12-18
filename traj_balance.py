@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 import math
 from typing import (
     Any,
@@ -138,14 +139,22 @@ class Batch:
 @dataclass
 class Trainer:
     env: Any
-    model: Any = None
-    samples: List[State] = None
-    batch_info: List[BatchInfo] = None
+
+    # Attributes for training run
+    model: Any = field(init=False)
+    samples: List[State] = field(init=False)
+    batch_info: List[BatchInfo] = field(init=False)
 
     def __post_init__(self):
         self.model = None
-        self.samples = []
+        self.samples = deque()
         self.batch_info = []
+
+    def add_sample(self, sample, reward):
+        # Add to rolling window of samples
+        self.samples.append(sample)
+        if len(self.samples) > self.max_samples:
+            self.samples.popleft()
 
     def policy_info(self, step, logits, direction) -> Namespace:
         '''
@@ -168,7 +177,7 @@ class Trainer:
             entropy=P_valid_action.entropy(),
         )
 
-    def process_batch(self, batch: List[Episode]):
+    def process_batch(self, batch: List[Episode], r_temp):
         '''
         - Compute trajbal loss
             - sum log of pf/pb for each episode
@@ -205,9 +214,21 @@ class Trainer:
             info.reward += rew
             info.max_reward = max(rew, info.max_reward)
 
+            #   - Reward may be tempered, but report the raw reward.
+            reward = episode.reward
+            info.reward += reward
+            info.max_reward = max(reward, info.max_reward)
+            final_reward = reward**(1/r_temp)
+
+            # Track sample
+            self.add_sample(
+                sample=episode.current().clone(),
+                reward=reward,
+            )
+
             # Episode loss
             # XXX: better or worse to have loss divided by batch size?
-            logR = torch.tensor(rew).log().clip(-20) # -20 instead of -inf if 0
+            logR = torch.tensor(final_reward).log().clip(-20) # -20 instead of -inf if 0
             ep_loss = (self.model.logZ + log_pf - logR - log_pb).pow(2) / batch.size()
             info.loss += ep_loss
 
@@ -220,6 +241,9 @@ class Trainer:
         temp=1.0,
         eps=0.0,
         grad_clip=1e6,
+        r_temp=1,
+        mlp_hidden=256,
+        mlp_layers=2,
     ):
         # Settings
         device = torch.device("cpu")
@@ -229,6 +253,8 @@ class Trainer:
         self.model = TrajBalMLP(
             input_dim=self.env.encoded_state_size(),
             output_dim=self.env.encoded_action_size(),
+            hidden_dim=mlp_hidden,
+            n_hidden_layers=mlp_layers,
         )
         self.model.to(device)
 
@@ -238,6 +264,7 @@ class Trainer:
             {'params': params.policies, 'lr': lr_model},
             {'params': params.logZ, 'lr': lr_Z},
         ])
+        maxR = 0.0
         for batch_i in (pbar := tqdm(range(n_batches))):
             # Generate Batch
             batch = Batch()
@@ -253,12 +280,11 @@ class Trainer:
                     action = self.env.to_action(action_index.item())
                     episode.step(action)
                 batch.append(episode)
-                self.samples.append(episode.current().clone())
 
             # Update Model
             # - Get target policy Pf/Pb/R quantities
             optimizer.zero_grad()
-            self.process_batch(batch)
+            self.process_batch(batch, r_temp=r_temp)
             loss = batch.info.loss
             loss.backward()
             grad_norm = clip_grad_norm_(self.model.parameters(), grad_clip)
@@ -268,10 +294,11 @@ class Trainer:
             batch.info.grad_norm = grad_norm
             batch.info.logZ = self.model.logZ.item()
             self.batch_info.append(batch.info)
+            maxR = max(maxR, batch.info.max_reward)
             pbar.set_postfix({
                 "loss": loss.item(),
                 "z": math.exp(self.model.logZ.item()),
-                "maxR": batch.info.max_reward,
+                "maxR": maxR,
             })
 
     def dashboard(self):

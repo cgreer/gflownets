@@ -145,7 +145,7 @@ def target_error_figure(trainer, n_episodes, step, lb):
     for t in range(lb, n_episodes + 1, step):
         rolling = trainer.samples[t-lb:t]
         empirical = to_empirical(rolling)
-        error = np.abs(empirical - target).sum()
+        error = np.abs(empirical - target).mean()
         info.append((t, error))
 
     print("episodes".ljust(10), "L1 Error")
@@ -161,7 +161,7 @@ def target_error_figure(trainer, n_episodes, step, lb):
 
 
 if __name__ == "__main__":
-    env = FourierGrid(H=4)
+    env = FourierGrid(H=64)
 
     n_episodes = 10000
 
@@ -172,7 +172,8 @@ if __name__ == "__main__":
         lr_model=0.00236, # 0.00236 in paper
         lr_Z=0.0695, # 0.00695 in paper
         temp=1.046, # 1.0458 in paper
-        eps=0.006, # 0.00543 in paper
+        eps=0.02, # 0.00543 in paper
+        r_temp=1.5, # 1.5 in paper; "beta"
     )
     trainer.dashboard()
 
@@ -180,7 +181,7 @@ if __name__ == "__main__":
         trainer,
         n_episodes,
         step=1000,
-        lb=3000,
+        lb=1000,
     )
 
     # predicted, target = compare_predicted_to_target(env, device)

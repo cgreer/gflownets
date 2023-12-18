@@ -182,7 +182,9 @@ class Env:
     reward_distribution: Matrix2D = field(init=False)
 
     def __post_init__(self):
+        print("\nComputing true reward distribution")
         self.reward_distribution = self.true_reward_distribution()
+        print("...done")
 
     def spawn(self) -> Episode:
         initial_state = State(features=[0, 0, 0], H=self.H)
