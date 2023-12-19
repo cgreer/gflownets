@@ -365,7 +365,7 @@ class HumanTree:
         Cls,
         dataset,
         max_depth,
-        n_episodes,
+        n_episodes=1_000_000,
     ):
         env = DTBuilderEnv(
             dataset=dataset,
@@ -390,13 +390,14 @@ class HumanTree:
                 rprint("\n[green]Game State[/green]")
                 print("Working split:", s.split)
                 print("Stopped:", s.stopped)
-                s.tree.game_display(n_features=n_features)
+                s.tree.game_display(n_features=n_features, max_depth=max_depth)
 
                 # Show user valid actions
                 print("\n\nACTIONS:")
                 for i, action in enu(v_actions):
                     # print(i, action)
                     print("  ", str(i) + " -", env.pretty_action(action))
+                print("  ", "sp <node_id>")
                 print("  ", "quit")
 
                 # Get valid choice
@@ -404,6 +405,17 @@ class HumanTree:
                 valid_resps.add("quit")
                 while True:
                     user_resp = input("\nAction? ").strip()
+
+                    # User wants to scatterplot a node
+                    if user_resp.startswith("sp "):
+                        _, nid = user_resp.split("sp ", 1)
+                        try:
+                            s.tree.scatterplot(int(nid))
+                        except: # noqa
+                            print("scatter failed")
+                        continue
+
+                    # Verify valid action
                     if user_resp not in valid_resps:
                         print("Invalid action:", user_resp)
                         continue
@@ -638,7 +650,6 @@ if __name__ == "__main__":
     # Human Trainer
     ################
     N = 3000
-    n_episodes = 100 # Can quit whenever..
     max_depth = 5
     n_features = 4
     n_partitions = 9
@@ -655,18 +666,28 @@ if __name__ == "__main__":
     human_tree = HumanTree.train(
         task.train,
         max_depth=max_depth,
-        n_episodes=10,
     )
     human_acc = human_tree.evaluate(task.test)
 
-    # Train CART on task
+    # Train CART
     cart = CART.train(task.train)
     cart_acc = cart.evaluate(task.test)
+
+    # Train RandTrees
+    rtree = RandTrees.train(
+        task.train,
+        n_episodes=5000,
+        n_features=n_features,
+        max_depth=max_depth,
+    )
+    rtree_acc = rtree.evaluate(task.test)
 
     rprint("\n[green]True Tree[/green]")
     task.display()
 
     rprint("\n[green]Scores[/green]")
-    print("Test acc (human):".ljust(20), human_acc)
-    print("Test acc (CART):".ljust(20), cart_acc)
+    print("Truth:".ljust(20), task.test_acc)
+    print("Human:".ljust(20), human_acc)
+    print("CART:".ljust(20), cart_acc)
+    print("RandTrees:".ljust(20), rtree_acc)
     print()

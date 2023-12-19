@@ -735,7 +735,7 @@ class Tree:
             stack.append(self.nodes[node.fail_id])
             stack.append(self.nodes[node.pass_id])
 
-    def game_display(self, n_features):
+    def game_display(self, n_features, max_depth, leaves_only=True):
         '''
         Info a human needs to play the "Build a DT" game.
         '''
@@ -744,27 +744,35 @@ class Tree:
         n_nodes = self.size()
         n_ufeats = len(self.utilized_features())
         n_leaves = len(self.leaves())
+        depth = max([x.depth for x in self.leaves()])
 
         rprint("\n[bold green]Tree[/bold green]")
         print("accuracy:", round(tree_acc, 2))
         print("nodes:", n_nodes)
         print("leaves:", n_leaves)
         print("utilized features:", n_ufeats)
+        print("depth:", depth)
         self.display()
 
         # Node Info
         rprint("\n[bold green]Nodes[/bold green]")
+        nodes = []
         for node in self.bfs():
-            # node_acc = self.node_accuracy(node_id)
-            partition = node.partition
+            if leaves_only and not self.leaf(node.id):
+                continue
+            if node.depth >= max_depth:
+                continue
+            nodes.append(node)
+        nodes.sort(key=lambda x: x.size(), reverse=False) # largest last
+        for node in nodes:
             leaf_tag = ""
             if self.leaf(node.id):
                 leaf_tag = " [bold yellow]LEAF[/bold yellow]"
-
             rprint("\nNode: " + str(node.id) + leaf_tag)
             print("acc:", round(self.node_accuracy(node.id), 3))
             print("size:", node.size())
-            print("partition:", partition)
+            print("depth:", node.depth)
+            print("partition:", node.partition)
             # self.scatterplot(node.id)
 
             tinfo = self.thresh_info(node.id, n_features)
@@ -777,6 +785,13 @@ class Tree:
                 view_info = [(i, x.ratio) for i, x in enu(tinfo[feat])]
                 view = FeatureRatioView.ratio_view(view_info)
                 rprint(f"f{feat}: ".ljust(6) + view)
+
+        rprint("\n[bold green]Score[/bold green]")
+        print("accuracy:", round(tree_acc, 2))
+        print("nodes:", n_nodes)
+        print("leaves:", n_leaves)
+        print("utilized features:", n_ufeats)
+        print("depth:", depth)
 
 
 @dataclass
@@ -1518,7 +1533,7 @@ class HaystackTask:
 class FeatureRatioView:
 
     @classmethod
-    def to_color(Cls, val):
+    def to_rg_color(Cls, val):
         if val is None:
             return "#555555"
         red = "00"
@@ -1530,6 +1545,15 @@ class FeatureRatioView:
             gval = val - 0.50
             green = hex(round(255 * gval))[-2:]
         return "#" + red + green + "00"
+
+    @classmethod
+    def to_color(Cls, val):
+        if val is None:
+            return "#555555"
+        green = "00"
+        gval = min(val, 0.99)
+        green = hex(round(255 * gval))[-2:]
+        return "#" + "00" + green + "00"
 
     @classmethod
     def ratio_view(Cls, vals):
@@ -1896,7 +1920,7 @@ class Tasks:
         )
 
         # Tree Info
-        tree.game_display(n_features=n_features)
+        tree.game_display(n_features=n_features, max_depth=max_depth)
 
     def check_colors(self):
         rprint("[rgb(100, 0, 0)]hello[/rgb(100, 0, 0)]")
