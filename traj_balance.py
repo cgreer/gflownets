@@ -186,13 +186,11 @@ class Trainer:
         - Track stats (see BatchInfo)
         '''
         info = batch.info
-        t_steps = 0
         for episode in batch.episodes:
             info.size += 1
             log_pf = torch.tensor(0).float()
             log_pb = torch.tensor(0).float()
             final_t = episode.n_steps() - 1
-            t_steps += episode.n_steps()
             for step in episode.steps():
                 info.steps += 1
                 pf_logits, pb_logits = self.model(step.state.encode())
@@ -231,7 +229,7 @@ class Trainer:
             ep_loss = (self.model.logZ + log_pf - logR - log_pb).pow(2) / batch.size()
             info.loss += ep_loss
 
-        print("steps / episode", t_steps / 16)
+        # User-specified post-batch operations happen here
         self.post_batch_hook()
 
     def post_batch_hook(self):
@@ -304,13 +302,16 @@ class Trainer:
             # Monitoring / Report in
             batch.info.grad_norm = grad_norm
             batch.info.logZ = self.model.logZ.item()
-            self.batch_info.append(batch.info)
+            # self.batch_info.append(batch.info)
             maxR = max(maxR, batch.info.max_reward)
             pbar.set_postfix({
                 "loss": loss.item(),
                 "z": math.exp(self.model.logZ.item()),
-                "maxR": maxR,
+                "max(R)": maxR,
+                "steps/ep": batch.info.steps / batch.size(),
             })
+            if batch_i % (n_batches // 20) == 0:
+                print() # to snapshot progbar
 
     def dashboard(self):
         n_batches = len(self.batch_info)

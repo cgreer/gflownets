@@ -165,7 +165,7 @@ class Episode:
         if s.terminal():
             x1 = self.history[-1].features[0]
             x2 = self.history[-1].features[1]
-            return self.reward_distribution[x2][x1]
+            return self.reward_distribution[x2][x1] # XXX: This right order?
         return None
 
 

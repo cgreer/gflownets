@@ -78,7 +78,7 @@ class FigInfo:
 if __name__ == "__main__":
     env = FourierGrid(H=4)
 
-    n_episodes = 10000
+    n_episodes = 10_000
     batch_size = 16
 
     fig_info = FigInfo()
@@ -97,12 +97,12 @@ if __name__ == "__main__":
         lr_model=0.00236, # 0.00236 in paper
         lr_Z=0.0695, # 0.00695 in paper
         temp=1.046, # 1.0458 in paper
-        eps=0.02, # 0.00543 in paper
-        r_temp=1.5, # 1.5 in paper; "beta"
+        eps=0.005, # 0.00543 in paper
+        r_temp=1.5, # 1.5 in paper; "beta"; explore more when > 1
         max_samples=100,
         post_batch=post_batch,
     )
-    trainer.dashboard()
+    # trainer.dashboard()
 
     target_error_figure(
         trainer,
