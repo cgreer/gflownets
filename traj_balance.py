@@ -79,7 +79,8 @@ class TrajBalMLP(nn.Module):
         n_hidden_layers: Optional[int] = 2,
     ):
         super().__init__()
-        activation = nn.ReLU
+        # activation = nn.ReLU
+        activation = nn.LeakyReLU
 
         # logZ
         # - init to 0 (log(1) == 0)
@@ -302,7 +303,7 @@ class Trainer:
             # Monitoring / Report in
             batch.info.grad_norm = grad_norm
             batch.info.logZ = self.model.logZ.item()
-            # self.batch_info.append(batch.info)
+            # self.batch_info.append(batch.info) # XXX: Memory leak...
             maxR = max(maxR, batch.info.max_reward)
             pbar.set_postfix({
                 "loss": loss.item(),

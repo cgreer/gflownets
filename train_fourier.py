@@ -22,13 +22,10 @@ def to_empirical(exits, H):
     return grid
 
 
-def target_error_figure(
-    trainer,
-    fig_info,
-    step,
-    lb,
-):
-    target = trainer.env.reward_distribution
+def target_error_figure(trainer, fig_info, step, lb):
+    target = trainer.env.reward_fxn.rewards
+    target = target / target.sum() # normalize
+
     H = trainer.env.H
     exits = fig_info.exits
     n_episodes = len(exits)
@@ -47,14 +44,14 @@ def target_error_figure(
             error,
         )
 
-    # Plot dist + final empirical
+    # Plot dist + final seen empirical
     fig, axes = plt.subplots(1, 2, figsize=(12, 6))
     ax = axes[0]
     im = ax.imshow(empirical, cmap='gray', interpolation='nearest')
     plt.colorbar(im, ax=ax)
     ax.set_title("Empirical")
     ax = axes[1]
-    im = ax.imshow(env.reward_distribution, cmap='gray', interpolation='nearest')
+    im = ax.imshow(target, cmap='gray', interpolation='nearest')
     plt.colorbar(im, ax=ax)
     ax.set_title("Target")
     plt.show()
@@ -68,38 +65,35 @@ class FigInfo:
         self.exits = []
 
     def add_sample(self, state):
-        assert state.features[-1] == 1
-        self.exits.append((
-            state.features[0],
-            state.features[1],
-        ))
+        assert state.final is True
+        self.exits.append((state.row, state.col))
 
 
 if __name__ == "__main__":
-    env = FourierGrid(H=4)
+    env = FourierGrid(H=16)
 
-    n_episodes = 10_000
-    batch_size = 16
+    n_episodes = 150000
+    batch_size = 64
 
     fig_info = FigInfo()
 
-    def post_batch(x):
+    def post_batch(tr):
         # No slices for deque...
-        size = len(x.samples)
+        size = len(tr.samples)
         for n_samp in range(batch_size):
-            samp = x.samples[size - n_samp - 1]
+            samp = tr.samples[size - n_samp - 1]
             fig_info.add_sample(samp)
 
     trainer = Trainer(env=env)
     trainer.train(
         n_episodes=n_episodes,
         batch_size=batch_size,
-        lr_model=0.00236, # 0.00236 in paper
-        lr_Z=0.0695, # 0.00695 in paper
-        temp=1.046, # 1.0458 in paper
-        eps=0.005, # 0.00543 in paper
+        # lr_model=0.00112,
+        # lr_Z=0.0634,
+        # temp=1.046, # 1.0458 in paper
+        eps=0.006, # 0.00543 in paper
+        # eps=0.10, # 0.00543 in paper
         r_temp=1.5, # 1.5 in paper; "beta"; explore more when > 1
-        max_samples=100,
         post_batch=post_batch,
     )
     # trainer.dashboard()
@@ -107,6 +101,6 @@ if __name__ == "__main__":
     target_error_figure(
         trainer,
         fig_info,
-        step=1000,
-        lb=5000,
+        step=n_episodes // 20,
+        lb=(n_episodes // 5),
     )
